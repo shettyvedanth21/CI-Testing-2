@@ -1,0 +1,82 @@
+groups:
+  - name: device-dashboard-slo
+    rules:
+      - alert: DashboardSnapshotFreshnessBreach
+        expr: max by (snapshot_key) (dashboard_snapshot_age_seconds) > 15
+        for: 2m
+        labels:
+          severity: warning
+          service: device-service
+        annotations:
+          summary: "Dashboard snapshot freshness breach"
+          description: "Snapshot {{ $labels.snapshot_key }} age is {{ $value }}s (>15s)."
+
+      - alert: DashboardSchedulerLagBreach
+        expr: dashboard_scheduler_lag_seconds > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: device-service
+        annotations:
+          summary: "Dashboard scheduler lag breach"
+          description: "Scheduler lag is {{ $value }}s (>10s)."
+
+      - alert: FleetStreamLagP95Breach
+        expr: histogram_quantile(0.95, sum(rate(fleet_stream_emit_lag_seconds_bucket[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: critical
+          service: device-service
+        annotations:
+          summary: "Fleet stream lag p95 breach"
+          description: "Fleet stream p95 lag is above 1s for 5 minutes."
+
+      - alert: FleetStreamDropsSpike
+        expr: increase(fleet_stream_queue_drops_total[5m]) > 20
+        for: 2m
+        labels:
+          severity: critical
+          service: device-service
+        annotations:
+          summary: "Fleet stream queue drops spiking"
+          description: "Queue drops exceeded threshold in last 5 minutes."
+
+      - alert: DashboardSnapshotFailureRateBreach
+        expr: increase(dashboard_snapshot_materialize_failures_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: device-service
+        annotations:
+          summary: "Snapshot materialization failures high"
+          description: "Snapshot materialization failures exceeded threshold."
+
+      - alert: DashboardCostFreshnessBreach
+        expr: dashboard_cost_data_age_seconds > 15
+        for: 2m
+        labels:
+          severity: warning
+          service: device-service
+        annotations:
+          summary: "Dashboard INR cost freshness breach"
+          description: "Dashboard INR cost data age is {{ $value }}s (>15s)."
+
+      - alert: DashboardCostUnavailableSpike
+        expr: increase(dashboard_cost_data_state_total{state=~"stale|unavailable"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          service: device-service
+        annotations:
+          summary: "Dashboard INR cost stale/unavailable spike"
+          description: "INR cost state degraded repeatedly in last 5 minutes."
+
+      - alert: DashboardCostRefreshFailures
+        expr: increase(dashboard_cost_refresh_failures_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: device-service
+        annotations:
+          summary: "Dashboard INR cost refresh failures high"
+          description: "Cost refresh failures exceeded threshold in last 5 minutes."

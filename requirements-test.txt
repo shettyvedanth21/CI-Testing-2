@@ -1,0 +1,6 @@
+pytest>=7.4.0
+pytest-timeout>=2.1.0
+httpx>=0.25.0
+paho-mqtt>=1.6.1
+requests>=2.31.0
+pymysql>=1.1.0

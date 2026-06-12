@@ -1,0 +1,106 @@
+# Emergency production fallback for building first-party app images directly on
+# the server when GHCR publishing or GitHub Actions are temporarily unavailable.
+#
+# Use together with docker-compose.yml:
+# docker compose --env-file .env -f docker-compose.yml -f docker-compose.server-build.yml up -d --build
+#
+# This file intentionally restores only build directives for first-party
+# services. It does not introduce local-only infrastructure such as MySQL,
+# MinIO, or the device simulator.
+
+services:
+  device-service:
+    build:
+      context: .
+      dockerfile: services/device-service/Dockerfile
+
+  device-service-scheduler:
+    build:
+      context: .
+      dockerfile: services/device-service/Dockerfile
+
+  energy-service:
+    build:
+      context: .
+      dockerfile: services/energy-service/Dockerfile
+
+  data-service:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+
+  data-telemetry-worker:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+
+  data-telemetry-worker-2:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+
+  rule-engine-service:
+    build:
+      context: .
+      dockerfile: services/rule-engine-service/Dockerfile
+
+  rule-engine-worker:
+    build:
+      context: .
+      dockerfile: services/rule-engine-service/Dockerfile
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: api
+
+  analytics-worker:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: worker
+
+  analytics-worker-2:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: worker
+
+  data-export-service:
+    build:
+      context: .
+      dockerfile: services/data-export-service/Dockerfile
+
+  reporting-service:
+    build:
+      context: .
+      dockerfile: services/reporting-service/Dockerfile
+
+  reporting-worker:
+    build:
+      context: .
+      dockerfile: services/reporting-service/Dockerfile
+
+  waste-analysis-service:
+    build:
+      context: .
+      dockerfile: services/waste-analysis-service/Dockerfile
+
+  waste-analysis-worker:
+    build:
+      context: .
+      dockerfile: services/waste-analysis-service/Dockerfile
+
+  copilot-service:
+    build:
+      context: .
+      dockerfile: services/copilot-service/Dockerfile
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+
+  ui-web:
+    build: ./ui-web

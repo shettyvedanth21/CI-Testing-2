@@ -1,0 +1,52 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.venv*/
+.venv-contract-tests/
+.venv-validation/
+.venv-phase1/
+.venv-phase1-chart/
+.venv-phase1-chart-py311/
+venv/
+.pytest_cache/
+.validation-venv/
+.venv-reporting/
+.codex-load-venv/
+artifacts/
+test-results/
+ui-web/test-results/
+
+# local operational notes / Codex scratch docs
+memory.md/
+implementation-docs/MACHINE_HEALTH_COMPLETION_TRACKER.md
+implementation-docs/MACHINE_HEALTH_INTELLIGENCE_PLAN.md
+implementation-docs/multi.md
+
+
+# mac
+.DS_Store
+
+# editor-local
+.vscode/settings.json
+
+# logs
+*.log
+
+# local env
+.env
+.env.local
+
+
+# local runtime
+dlq/
+data/
+.influxdbv2/
+
+# mqtt / local state
+mosquitto/
+
+.Device-Firmware-Team

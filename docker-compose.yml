@@ -1,0 +1,1833 @@
+# Base stack for production-like deployments. Local-only infrastructure such as
+# Docker MySQL and MinIO lives in docker-compose.local.yml and should be loaded
+# explicitly for local development.
+services:
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_CLI_CONFIG_NAME: energy-platform
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123
+      DOCKER_INFLUXDB_INIT_ORG: energy-org
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: energy-token
+      INFLUXD_HTTP_BIND_ADDRESS: :8086
+    expose:
+      - "8086"
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: analytics_redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "${REDIS_MAXMEMORY:-1gb}",
+        "--maxmemory-policy",
+        "${REDIS_MAXMEMORY_POLICY:-noeviction}",
+        "--requirepass",
+        "${REDIS_PASSWORD:-}",
+      ]
+    expose:
+      - "6379"
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "sh", "-c", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  emqx:
+    image: emqx/emqx:5.3.0
+    container_name: emqx
+    hostname: emqx.local
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    networks:
+      energy-net:
+        aliases:
+          - emqx.local
+    environment:
+      # EMQX health checks rely on the Erlang node name matching a resolvable hostname.
+      EMQX_NODE__NAME: emqx@emqx.local
+      EMQX_HOST: emqx.local
+      EMQX_LOADED_PLUGINS: "emqx_retained,emqx_rule_engine,emqx_dashboard"
+      EMQX_AUTH_MYSQL_HOST: "${EMQX_AUTH_MYSQL_HOST:-}"
+      EMQX_AUTH_MYSQL_PORT: "${EMQX_AUTH_MYSQL_PORT:-}"
+      EMQX_AUTH_MYSQL_DATABASE: "${EMQX_AUTH_MYSQL_DATABASE:-}"
+      EMQX_AUTH_MYSQL_USERNAME: "${EMQX_AUTH_MYSQL_USERNAME:-}"
+      EMQX_AUTH_MYSQL_PASSWORD: "${EMQX_AUTH_MYSQL_PASSWORD:-}"
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+      - ${EMQX_PRODUCTION_CONFIG_PATH:-./ops/emqx/production.base.hocon}:/opt/emqx/etc/emqx.conf:ro
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx_ctl", "status"]
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  emqx-auth-bootstrap:
+    image: curlimages/curl:8.7.1
+    container_name: emqx-auth-bootstrap
+    restart: "no"
+    depends_on:
+      emqx:
+        condition: service_healthy
+    environment:
+      EMQX_DASHBOARD_USERNAME: "${EMQX_DASHBOARD_USERNAME:-admin}"
+      EMQX_DASHBOARD_PASSWORD: "${EMQX_DASHBOARD_PASSWORD:-public}"
+      MQTT_PASSWORD: "${MQTT_PASSWORD:-local-dev-data-service-password}"
+    command:
+      [
+        "sh",
+        "-c",
+        "set -eu; \
+        until curl -fsS http://emqx:18083/api/v5/status >/dev/null 2>&1; do sleep 2; done; \
+        TOKEN=$$(curl -fsS -H 'Content-Type: application/json' \
+          -d '{\"username\":\"'\"$$EMQX_DASHBOARD_USERNAME\"'\",\"password\":\"'\"$$EMQX_DASHBOARD_PASSWORD\"'\"}' \
+          http://emqx:18083/api/v5/login | sed -n 's/.*\"token\":\"\\([^\"]*\\)\".*/\\1/p'); \
+        test -n \"$$TOKEN\"; \
+        CREATE_BODY=$$(printf '{\"user_id\":\"internal:data-service\",\"password\":\"%s\",\"is_superuser\":false}' \"$$MQTT_PASSWORD\"); \
+        UPDATE_BODY=$$(printf '{\"password\":\"%s\",\"is_superuser\":false}' \"$$MQTT_PASSWORD\"); \
+        curl -fsS -H \"Authorization: Bearer $$TOKEN\" -H 'Content-Type: application/json' \
+          -X POST \
+          -d \"$$CREATE_BODY\" \
+          'http://emqx:18083/api/v5/authentication/password_based%3Abuilt_in_database/users' >/dev/null \
+          || curl -fsS -H \"Authorization: Bearer $$TOKEN\" -H 'Content-Type: application/json' \
+            -X PUT \
+            -d \"$$UPDATE_BODY\" \
+            'http://emqx:18083/api/v5/authentication/password_based%3Abuilt_in_database/users/internal%3Adata-service' >/dev/null"
+      ]
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  device-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-device-service:${DEVICE_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: device-service
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEVICE_SERVICE_RUNTIME=api
+      - DEVICE_SERVICE_ENABLE_FLEET_STREAM=true
+      - DEVICE_SERVICE_RUN_STARTUP_MAINTENANCE=false
+      - DEVICE_SERVICE_RUN_EMBEDDED_SCHEDULERS=false
+      - UVICORN_WORKERS=${DEVICE_SERVICE_UVICORN_WORKERS:-1}
+      - DATA_SERVICE_BASE_URL=http://data-service:8081
+      - RULE_ENGINE_SERVICE_BASE_URL=http://rule-engine-service:8002
+      - REPORTING_SERVICE_BASE_URL=http://reporting-service:8085
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - DASHBOARD_STREAM_HEARTBEAT_SECONDS=5
+      - DASHBOARD_STREAM_QUEUE_SIZE=64
+      - DASHBOARD_STREAM_SEND_TIMEOUT_SECONDS=10
+      - DASHBOARD_SNAPSHOT_STALE_AFTER_SECONDS=15
+      - DASHBOARD_SCHEDULER_MAX_DRIFT_SECONDS=10
+      - DASHBOARD_RECONCILE_INTERVAL_SECONDS=60
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - FLEET_STREAM_REDIS_CHANNEL=factoryops:fleet_stream:v1
+      - ENERGY_SERVICE_BASE_URL=http://energy-service:8010
+      - PROJECTION_BATCH_CHUNK_SIZE=50
+      - DEGRADATION_ENABLED=${DEGRADATION_ENABLED:-false}
+      - DEGRADATION_FEATURE_WINDOW_INTERVAL_SECONDS=${DEGRADATION_FEATURE_WINDOW_INTERVAL_SECONDS:-3600}
+      - DEGRADATION_BASELINE_INTERVAL_SECONDS=${DEGRADATION_BASELINE_INTERVAL_SECONDS:-7200}
+      - DEGRADATION_SCORING_INTERVAL_SECONDS=${DEGRADATION_SCORING_INTERVAL_SECONDS:-1800}
+      - DEGRADATION_RETENTION_DAYS=${DEGRADATION_RETENTION_DAYS:-90}
+      - DEGRADATION_CLEANUP_INTERVAL_SECONDS=${DEGRADATION_CLEANUP_INTERVAL_SECONDS:-7200}
+      - DEGRADATION_STALE_THRESHOLD_MINUTES=${DEGRADATION_STALE_THRESHOLD_MINUTES:-60}
+      - ANOMALY_ENABLED=${ANOMALY_ENABLED:-false}
+      - ANOMALY_DETECTION_INTERVAL_SECONDS=${ANOMALY_DETECTION_INTERVAL_SECONDS:-1800}
+      - ANOMALY_BASELINE_INTERVAL_SECONDS=${ANOMALY_BASELINE_INTERVAL_SECONDS:-7200}
+      - ANOMALY_DAILY_AGGREGATION_INTERVAL_SECONDS=${ANOMALY_DAILY_AGGREGATION_INTERVAL_SECONDS:-3600}
+      - ANOMALY_WEEKLY_AGGREGATION_INTERVAL_SECONDS=${ANOMALY_WEEKLY_AGGREGATION_INTERVAL_SECONDS:-21600}
+      - ANOMALY_RETENTION_DAYS=${ANOMALY_RETENTION_DAYS:-90}
+      - ANOMALY_CLEANUP_INTERVAL_SECONDS=${ANOMALY_CLEANUP_INTERVAL_SECONDS:-7200}
+      - ANOMALY_MAX_OPEN_EVENT_AGE_HOURS=${ANOMALY_MAX_OPEN_EVENT_AGE_HOURS:-24}
+      - SNAPSHOT_STORAGE_BACKEND=${SNAPSHOT_STORAGE_BACKEND:-auto}
+      - SNAPSHOT_MINIO_BUCKET=${SNAPSHOT_MINIO_BUCKET:-dashboard-snapshots}
+      - SNAPSHOT_MINIO_ENDPOINT=${SNAPSHOT_MINIO_ENDPOINT:-}
+      - SNAPSHOT_MINIO_ACCESS_KEY=${SNAPSHOT_MINIO_ACCESS_KEY:-}
+      - SNAPSHOT_MINIO_SECRET_KEY=${SNAPSHOT_MINIO_SECRET_KEY:-}
+      - SNAPSHOT_MINIO_SECURE=${SNAPSHOT_MINIO_SECURE:-false}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-}
+    expose:
+      - "8000"
+    ports:
+      - "${DEVICE_SERVICE_HOST_BIND:-127.0.0.1}:${DEVICE_SERVICE_HOST_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  device-service-scheduler:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-device-service:${DEVICE_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: device-service-scheduler
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEVICE_SERVICE_RUNTIME=scheduler
+      - DEVICE_SERVICE_ENABLE_FLEET_STREAM=false
+      - DEVICE_SERVICE_RUN_STARTUP_MAINTENANCE=true
+      - DEVICE_SERVICE_RUN_EMBEDDED_SCHEDULERS=true
+      - DATA_SERVICE_BASE_URL=http://data-service:8081
+      - RULE_ENGINE_SERVICE_BASE_URL=http://rule-engine-service:8002
+      - REPORTING_SERVICE_BASE_URL=http://reporting-service:8085
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - DASHBOARD_STREAM_HEARTBEAT_SECONDS=5
+      - DASHBOARD_STREAM_QUEUE_SIZE=64
+      - DASHBOARD_STREAM_SEND_TIMEOUT_SECONDS=10
+      - DASHBOARD_SNAPSHOT_STALE_AFTER_SECONDS=15
+      - DASHBOARD_SCHEDULER_MAX_DRIFT_SECONDS=10
+      - DASHBOARD_RECONCILE_INTERVAL_SECONDS=60
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - FLEET_STREAM_REDIS_CHANNEL=factoryops:fleet_stream:v1
+      - ENERGY_SERVICE_BASE_URL=http://energy-service:8010
+      - PROJECTION_BATCH_CHUNK_SIZE=50
+      - DEGRADATION_ENABLED=${DEGRADATION_ENABLED:-false}
+      - DEGRADATION_FEATURE_WINDOW_INTERVAL_SECONDS=${DEGRADATION_FEATURE_WINDOW_INTERVAL_SECONDS:-3600}
+      - DEGRADATION_BASELINE_INTERVAL_SECONDS=${DEGRADATION_BASELINE_INTERVAL_SECONDS:-7200}
+      - DEGRADATION_SCORING_INTERVAL_SECONDS=${DEGRADATION_SCORING_INTERVAL_SECONDS:-1800}
+      - DEGRADATION_RETENTION_DAYS=${DEGRADATION_RETENTION_DAYS:-90}
+      - DEGRADATION_CLEANUP_INTERVAL_SECONDS=${DEGRADATION_CLEANUP_INTERVAL_SECONDS:-7200}
+      - DEGRADATION_STALE_THRESHOLD_MINUTES=${DEGRADATION_STALE_THRESHOLD_MINUTES:-60}
+      - ANOMALY_ENABLED=${ANOMALY_ENABLED:-false}
+      - ANOMALY_DETECTION_INTERVAL_SECONDS=${ANOMALY_DETECTION_INTERVAL_SECONDS:-1800}
+      - ANOMALY_BASELINE_INTERVAL_SECONDS=${ANOMALY_BASELINE_INTERVAL_SECONDS:-7200}
+      - ANOMALY_DAILY_AGGREGATION_INTERVAL_SECONDS=${ANOMALY_DAILY_AGGREGATION_INTERVAL_SECONDS:-3600}
+      - ANOMALY_WEEKLY_AGGREGATION_INTERVAL_SECONDS=${ANOMALY_WEEKLY_AGGREGATION_INTERVAL_SECONDS:-21600}
+      - ANOMALY_RETENTION_DAYS=${ANOMALY_RETENTION_DAYS:-90}
+      - ANOMALY_CLEANUP_INTERVAL_SECONDS=${ANOMALY_CLEANUP_INTERVAL_SECONDS:-7200}
+      - ANOMALY_MAX_OPEN_EVENT_AGE_HOURS=${ANOMALY_MAX_OPEN_EVENT_AGE_HOURS:-24}
+      - SNAPSHOT_STORAGE_BACKEND=${SNAPSHOT_STORAGE_BACKEND:-auto}
+      - SNAPSHOT_MINIO_BUCKET=${SNAPSHOT_MINIO_BUCKET:-dashboard-snapshots}
+      - SNAPSHOT_MINIO_ENDPOINT=${SNAPSHOT_MINIO_ENDPOINT:-}
+      - SNAPSHOT_MINIO_ACCESS_KEY=${SNAPSHOT_MINIO_ACCESS_KEY:-}
+      - SNAPSHOT_MINIO_SECRET_KEY=${SNAPSHOT_MINIO_SECRET_KEY:-}
+      - SNAPSHOT_MINIO_SECURE=${SNAPSHOT_MINIO_SECURE:-false}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import sys; sys.exit(0 if 'app.scheduler_runner' in Path('/proc/1/cmdline').read_text().replace('\\x00', ' ') else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  energy-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-energy-service:${ENERGY_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: energy-service
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - UVICORN_WORKERS=${ENERGY_SERVICE_UVICORN_WORKERS:-1}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - ENERGY_STREAM_REDIS_CHANNEL=factoryops:energy_stream:v1
+      - REPORTING_SERVICE_BASE_URL=http://reporting-service:8085
+      - DEVICE_SERVICE_BASE_URL=http://device-service:8000
+      - ENERGY_BATCH_CHUNK_SIZE=120
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    expose:
+      - "8010"
+    depends_on:
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  data-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-data-service:${DATA_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: data-service
+    restart: unless-stopped
+    environment:
+      - APP_ROLE=api
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - PORT=8081
+      - HOST=0.0.0.0
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - MQTT_USERNAME=${MQTT_USERNAME:-internal:data-service}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-local-dev-data-service-password}
+      - MQTT_TOPIC=devices/+/telemetry
+      - MQTT_CLEAN_SESSION=true
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - ENERGY_SYNC_ENABLED=true
+      - RULE_ENGINE_URL=http://rule-engine-service:8002
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - FRONTEND_BASE_URL=${FRONTEND_BASE_URL:-}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://shivex.ai}
+      - EXTERNAL_URL=${EXTERNAL_URL:-}
+      - DATA_ALLOWED_ORIGINS=${DATA_ALLOWED_ORIGINS:-}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - DB_POOL_SIZE=${DATA_SERVICE_DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DATA_SERVICE_DB_MAX_OVERFLOW:-10}
+      - DB_POOL_RECYCLE=${DATA_SERVICE_DB_POOL_RECYCLE:-3600}
+      - DB_POOL_TIMEOUT=${DATA_SERVICE_DB_POOL_TIMEOUT:-30}
+      - DLQ_BACKEND=mysql
+      - DEVICE_SYNC_ENABLED=true
+      - DEVICE_SYNC_WORKERS=2
+      - TELEMETRY_WORKER_CONSUMER_NAME=data-telemetry-api
+      - TELEMETRY_INGEST_STREAM_NAME=telemetry_ingest_stream
+      - TELEMETRY_PROJECTION_STREAM_NAME=telemetry_projection_stream
+      - TELEMETRY_BROADCAST_STREAM_NAME=telemetry_broadcast_stream
+      - TELEMETRY_ENERGY_STREAM_NAME=telemetry_energy_stream
+      - TELEMETRY_RULES_STREAM_NAME=telemetry_rules_stream
+      - TELEMETRY_DEAD_LETTER_STREAM_NAME=telemetry_dead_letter_stream
+      - TELEMETRY_INGEST_STREAM_MAXLEN=250000
+      - TELEMETRY_PROJECTION_STREAM_MAXLEN=250000
+      - TELEMETRY_BROADCAST_STREAM_MAXLEN=250000
+      - TELEMETRY_ENERGY_STREAM_MAXLEN=250000
+      - TELEMETRY_RULES_STREAM_MAXLEN=250000
+      - TELEMETRY_INGEST_REJECT_THRESHOLD=200000
+      - TELEMETRY_PROJECTION_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_BROADCAST_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_ENERGY_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_RULES_BACKLOG_THRESHOLD=200000
+      - OUTBOX_POLL_INTERVAL_SEC=0.5
+      - OUTBOX_BATCH_SIZE=500
+      - OUTBOX_ENERGY_DELIVERY_BATCH_SIZE=100
+      - OUTBOX_MAX_BATCHES_PER_RUN=8
+      - OUTBOX_HTTP_TIMEOUT_SECONDS=8
+      - OUTBOX_HTTP_MAX_KEEPALIVE_CONNECTIONS=60
+      - OUTBOX_HTTP_MAX_CONNECTIONS=200
+      - OUTBOX_MAX_RETRIES=5
+      - OUTBOX_RETRY_BACKOFF_BASE_SECONDS=5
+      - OUTBOX_DEVICE_CONFIG_CACHE_TTL_SECONDS=300
+      - OUTBOX_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS=3
+      - TELEMETRY_HEALTH_LAG_WARN_SECONDS=30
+      - TELEMETRY_HEALTH_LAG_OVERLOAD_SECONDS=90
+      - TELEMETRY_PROJECTION_OVERLOAD_THRESHOLD=20000
+      - TELEMETRY_PROJECTION_OVERLOAD_MAX_DEFERS=40
+      - TELEMETRY_PROJECTION_DEFER_BASE_SECONDS=0.25
+      - TELEMETRY_PROJECTION_DEFER_MAX_SECONDS=8
+      - TELEMETRY_ENERGY_OVERLOAD_THRESHOLD=5000
+      - TELEMETRY_RULES_OVERLOAD_THRESHOLD=10000
+      - DEVICE_PROJECTION_TRANSPORT_RETRIES=3
+      - DEVICE_PROJECTION_RETRY_BACKOFF_BASE_SECONDS=0.2
+      - DEVICE_PROJECTION_RETRY_BACKOFF_MAX_SECONDS=2.0
+      - DEVICE_PROJECTION_MAX_INFLIGHT_REQUESTS=12
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=10
+      - DEVICE_PROJECTION_HTTP_MAX_KEEPALIVE_CONNECTIONS=80
+      - DEVICE_PROJECTION_HTTP_MAX_CONNECTIONS=200
+      - DEVICE_PROJECTION_HTTP_POOL_TIMEOUT_SECONDS=1.0
+      - OUTBOX_PENDING_WARN_THRESHOLD=2000
+      - OUTBOX_PENDING_OVERLOAD_THRESHOLD=10000
+      - DLQ_RETRY_BATCH_LIMIT=100
+      - DLQ_RETRY_BASE_BACKOFF_SECONDS=60
+      - DLQ_RETRY_MAX_BACKOFF_SECONDS=300
+      - RECONCILIATION_INTERVAL_SEC=300
+      - RECONCILIATION_DRIFT_WARN_MINUTES=10
+      - RECONCILIATION_DRIFT_RESYNC_MINUTES=30
+    expose:
+      - "8081"
+    ports:
+      - "${DATA_SERVICE_HOST_BIND:-127.0.0.1}:${DATA_SERVICE_HOST_PORT:-8081}:8081"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      emqx-auth-bootstrap:
+        condition: service_completed_successfully
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  data-telemetry-worker:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-data-service:${DATA_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: data-telemetry-worker
+    restart: unless-stopped
+    command: ["python", "-m", "src.worker_main"]
+    environment:
+      - APP_ROLE=worker
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - MQTT_TOPIC=devices/+/telemetry
+      - MQTT_CLEAN_SESSION=true
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - ENERGY_SYNC_ENABLED=true
+      - RULE_ENGINE_URL=http://rule-engine-service:8002
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - DB_POOL_SIZE=${DATA_SERVICE_DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DATA_SERVICE_DB_MAX_OVERFLOW:-10}
+      - DB_POOL_RECYCLE=${DATA_SERVICE_DB_POOL_RECYCLE:-3600}
+      - DB_POOL_TIMEOUT=${DATA_SERVICE_DB_POOL_TIMEOUT:-30}
+      - DLQ_BACKEND=mysql
+      - DEVICE_SYNC_ENABLED=true
+      - DEVICE_SERVICE_TIMEOUT=20
+      - TELEMETRY_WORKER_CONSUMER_NAME=data-telemetry-worker-1
+      - TELEMETRY_WORKER_MAINTENANCE_ENABLED=true
+      - TELEMETRY_WORKER_OUTBOX_RELAY_ENABLED=true
+      - TELEMETRY_INGEST_STREAM_NAME=telemetry_ingest_stream
+      - TELEMETRY_PROJECTION_STREAM_NAME=telemetry_projection_stream
+      - TELEMETRY_BROADCAST_STREAM_NAME=telemetry_broadcast_stream
+      - TELEMETRY_ENERGY_STREAM_NAME=telemetry_energy_stream
+      - TELEMETRY_RULES_STREAM_NAME=telemetry_rules_stream
+      - TELEMETRY_DEAD_LETTER_STREAM_NAME=telemetry_dead_letter_stream
+      - TELEMETRY_INGEST_STREAM_MAXLEN=250000
+      - TELEMETRY_PROJECTION_STREAM_MAXLEN=250000
+      - TELEMETRY_BROADCAST_STREAM_MAXLEN=250000
+      - TELEMETRY_ENERGY_STREAM_MAXLEN=250000
+      - TELEMETRY_RULES_STREAM_MAXLEN=250000
+      - TELEMETRY_INGEST_REJECT_THRESHOLD=200000
+      - TELEMETRY_PROJECTION_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_BROADCAST_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_ENERGY_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_RULES_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_PERSISTENCE_WORKERS=8
+      - TELEMETRY_PROJECTION_WORKERS=4
+      - TELEMETRY_BROADCAST_WORKERS=4
+      - TELEMETRY_ENERGY_WORKERS=6
+      - TELEMETRY_RULES_WORKERS=8
+      - TELEMETRY_INGEST_BATCH_SIZE=100
+      - TELEMETRY_PROJECTION_BATCH_SIZE=50
+      - TELEMETRY_BROADCAST_BATCH_SIZE=200
+      - TELEMETRY_ENERGY_BATCH_SIZE=200
+      - TELEMETRY_RULES_BATCH_SIZE=100
+      - TELEMETRY_STAGE_MAX_ATTEMPTS=3
+      - TELEMETRY_STAGE_RECLAIM_IDLE_MS=30000
+      - OUTBOX_POLL_INTERVAL_SEC=0.5
+      - OUTBOX_BATCH_SIZE=500
+      - OUTBOX_ENERGY_DELIVERY_BATCH_SIZE=100
+      - OUTBOX_MAX_BATCHES_PER_RUN=8
+      - OUTBOX_HTTP_TIMEOUT_SECONDS=8
+      - OUTBOX_HTTP_MAX_KEEPALIVE_CONNECTIONS=60
+      - OUTBOX_HTTP_MAX_CONNECTIONS=200
+      - OUTBOX_MAX_RETRIES=5
+      - OUTBOX_RETRY_BACKOFF_BASE_SECONDS=5
+      - OUTBOX_DEVICE_CONFIG_CACHE_TTL_SECONDS=300
+      - OUTBOX_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS=3
+      - TELEMETRY_HEALTH_LAG_WARN_SECONDS=30
+      - TELEMETRY_HEALTH_LAG_OVERLOAD_SECONDS=90
+      - TELEMETRY_PROJECTION_OVERLOAD_THRESHOLD=20000
+      - TELEMETRY_PROJECTION_OVERLOAD_MAX_DEFERS=40
+      - TELEMETRY_PROJECTION_DEFER_BASE_SECONDS=2
+      - TELEMETRY_PROJECTION_DEFER_MAX_SECONDS=8
+      - TELEMETRY_ENERGY_OVERLOAD_THRESHOLD=5000
+      - TELEMETRY_RULES_OVERLOAD_THRESHOLD=10000
+      - DEVICE_PROJECTION_TRANSPORT_RETRIES=3
+      - DEVICE_PROJECTION_RETRY_BACKOFF_BASE_SECONDS=0.2
+      - DEVICE_PROJECTION_RETRY_BACKOFF_MAX_SECONDS=2.0
+      - DEVICE_PROJECTION_MAX_INFLIGHT_REQUESTS=12
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=10
+      - DEVICE_PROJECTION_HTTP_MAX_KEEPALIVE_CONNECTIONS=80
+      - DEVICE_PROJECTION_HTTP_MAX_CONNECTIONS=200
+      - DEVICE_PROJECTION_HTTP_POOL_TIMEOUT_SECONDS=1.0
+      - OUTBOX_PENDING_WARN_THRESHOLD=2000
+      - OUTBOX_PENDING_OVERLOAD_THRESHOLD=10000
+      - DLQ_RETRY_BATCH_LIMIT=100
+      - DLQ_RETRY_BASE_BACKOFF_SECONDS=60
+      - DLQ_RETRY_MAX_BACKOFF_SECONDS=300
+      - RECONCILIATION_INTERVAL_SEC=300
+      - RECONCILIATION_DRIFT_WARN_MINUTES=10
+      - RECONCILIATION_DRIFT_RESYNC_MINUTES=30
+      - TENANT_LOCK_PROVIDER=redis
+      - TENANT_LOCK_REDIS_TTL_SECONDS=45
+      - TENANT_LOCK_REDIS_ACQUIRE_TIMEOUT_SECONDS=30
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      rule-engine-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json, os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL'], decode_responses=True); key='telemetry_worker_health:%s' % os.environ['TELEMETRY_WORKER_CONSUMER_NAME']; data=r.hgetall(key); sys.exit(0 if data.get('ready')=='true' else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  data-telemetry-worker-2:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-data-service:${DATA_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: data-telemetry-worker-2
+    restart: unless-stopped
+    command: ["python", "-m", "src.worker_main"]
+    environment:
+      - APP_ROLE=worker
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - MQTT_TOPIC=devices/+/telemetry
+      - MQTT_CLEAN_SESSION=true
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - ENERGY_SYNC_ENABLED=true
+      - RULE_ENGINE_URL=http://rule-engine-service:8002
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - DB_POOL_SIZE=${DATA_SERVICE_DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DATA_SERVICE_DB_MAX_OVERFLOW:-10}
+      - DB_POOL_RECYCLE=${DATA_SERVICE_DB_POOL_RECYCLE:-3600}
+      - DB_POOL_TIMEOUT=${DATA_SERVICE_DB_POOL_TIMEOUT:-30}
+      - DLQ_BACKEND=mysql
+      - DEVICE_SYNC_ENABLED=true
+      - DEVICE_SERVICE_TIMEOUT=20
+      - TELEMETRY_WORKER_CONSUMER_NAME=data-telemetry-worker-2
+      - TELEMETRY_WORKER_MAINTENANCE_ENABLED=false
+      - TELEMETRY_WORKER_OUTBOX_RELAY_ENABLED=false
+      - TELEMETRY_INGEST_STREAM_NAME=telemetry_ingest_stream
+      - TELEMETRY_PROJECTION_STREAM_NAME=telemetry_projection_stream
+      - TELEMETRY_BROADCAST_STREAM_NAME=telemetry_broadcast_stream
+      - TELEMETRY_ENERGY_STREAM_NAME=telemetry_energy_stream
+      - TELEMETRY_RULES_STREAM_NAME=telemetry_rules_stream
+      - TELEMETRY_DEAD_LETTER_STREAM_NAME=telemetry_dead_letter_stream
+      - TELEMETRY_INGEST_STREAM_MAXLEN=250000
+      - TELEMETRY_PROJECTION_STREAM_MAXLEN=250000
+      - TELEMETRY_BROADCAST_STREAM_MAXLEN=250000
+      - TELEMETRY_ENERGY_STREAM_MAXLEN=250000
+      - TELEMETRY_RULES_STREAM_MAXLEN=250000
+      - TELEMETRY_INGEST_REJECT_THRESHOLD=200000
+      - TELEMETRY_PROJECTION_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_BROADCAST_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_ENERGY_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_RULES_BACKLOG_THRESHOLD=200000
+      - TELEMETRY_PERSISTENCE_WORKERS=8
+      - TELEMETRY_PROJECTION_WORKERS=4
+      - TELEMETRY_BROADCAST_WORKERS=4
+      - TELEMETRY_ENERGY_WORKERS=6
+      - TELEMETRY_RULES_WORKERS=8
+      - TELEMETRY_INGEST_BATCH_SIZE=100
+      - TELEMETRY_PROJECTION_BATCH_SIZE=50
+      - TELEMETRY_BROADCAST_BATCH_SIZE=200
+      - TELEMETRY_ENERGY_BATCH_SIZE=200
+      - TELEMETRY_RULES_BATCH_SIZE=100
+      - TELEMETRY_STAGE_MAX_ATTEMPTS=3
+      - TELEMETRY_STAGE_RECLAIM_IDLE_MS=30000
+      - OUTBOX_POLL_INTERVAL_SEC=0.5
+      - OUTBOX_BATCH_SIZE=500
+      - OUTBOX_ENERGY_DELIVERY_BATCH_SIZE=100
+      - OUTBOX_MAX_BATCHES_PER_RUN=8
+      - OUTBOX_HTTP_TIMEOUT_SECONDS=8
+      - OUTBOX_HTTP_MAX_KEEPALIVE_CONNECTIONS=60
+      - OUTBOX_HTTP_MAX_CONNECTIONS=200
+      - OUTBOX_MAX_RETRIES=5
+      - OUTBOX_RETRY_BACKOFF_BASE_SECONDS=5
+      - OUTBOX_DEVICE_CONFIG_CACHE_TTL_SECONDS=300
+      - OUTBOX_CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS=3
+      - TELEMETRY_HEALTH_LAG_WARN_SECONDS=30
+      - TELEMETRY_HEALTH_LAG_OVERLOAD_SECONDS=90
+      - TELEMETRY_PROJECTION_OVERLOAD_THRESHOLD=20000
+      - TELEMETRY_PROJECTION_OVERLOAD_MAX_DEFERS=40
+      - TELEMETRY_PROJECTION_DEFER_BASE_SECONDS=2
+      - TELEMETRY_PROJECTION_DEFER_MAX_SECONDS=8
+      - TELEMETRY_ENERGY_OVERLOAD_THRESHOLD=5000
+      - TELEMETRY_RULES_OVERLOAD_THRESHOLD=10000
+      - DEVICE_PROJECTION_TRANSPORT_RETRIES=3
+      - DEVICE_PROJECTION_RETRY_BACKOFF_BASE_SECONDS=0.2
+      - DEVICE_PROJECTION_RETRY_BACKOFF_MAX_SECONDS=2.0
+      - DEVICE_PROJECTION_MAX_INFLIGHT_REQUESTS=12
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=10
+      - DEVICE_PROJECTION_HTTP_MAX_KEEPALIVE_CONNECTIONS=80
+      - DEVICE_PROJECTION_HTTP_MAX_CONNECTIONS=200
+      - DEVICE_PROJECTION_HTTP_POOL_TIMEOUT_SECONDS=1.0
+      - OUTBOX_PENDING_WARN_THRESHOLD=2000
+      - OUTBOX_PENDING_OVERLOAD_THRESHOLD=10000
+      - DLQ_RETRY_BATCH_LIMIT=100
+      - DLQ_RETRY_BASE_BACKOFF_SECONDS=60
+      - DLQ_RETRY_MAX_BACKOFF_SECONDS=300
+      - RECONCILIATION_INTERVAL_SEC=300
+      - RECONCILIATION_DRIFT_WARN_MINUTES=10
+      - RECONCILIATION_DRIFT_RESYNC_MINUTES=30
+      - TENANT_LOCK_PROVIDER=redis
+      - TENANT_LOCK_REDIS_TTL_SECONDS=45
+      - TENANT_LOCK_REDIS_ACQUIRE_TIMEOUT_SECONDS=30
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      rule-engine-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json, os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL'], decode_responses=True); key='telemetry_worker_health:%s' % os.environ['TELEMETRY_WORKER_CONSUMER_NAME']; data=r.hgetall(key); sys.exit(0 if data.get('ready')=='true' else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  rule-engine-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-rule-engine-service:${RULE_ENGINE_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: rule-engine-service
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - EMAIL_ENABLED=${EMAIL_ENABLED:-true}
+      - EMAIL_SMTP_HOST=${EMAIL_SMTP_HOST:-${SMTP_SERVER:-smtp.gmail.com}}
+      - EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT:-587}
+      - EMAIL_SMTP_USERNAME=${EMAIL_SMTP_USERNAME:-${EMAIL_SENDER:-}}
+      - EMAIL_SMTP_PASSWORD=${EMAIL_SMTP_PASSWORD:-${EMAIL_PASSWORD:-}}
+      - EMAIL_FROM_ADDRESS=${EMAIL_FROM_ADDRESS:-${EMAIL_SENDER:-alerts@energy-platform.com}}
+      - SMS_ENABLED=${SMS_ENABLED:-false}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_SMS_FROM_NUMBER=${TWILIO_SMS_FROM_NUMBER:-}
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
+      - TWILIO_WHATSAPP_FROM_NUMBER=${TWILIO_WHATSAPP_FROM_NUMBER:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    expose:
+      - "8002"
+    ports:
+      - "${RULE_ENGINE_SERVICE_HOST_BIND:-127.0.0.1}:${RULE_ENGINE_SERVICE_HOST_PORT:-8002}:8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  rule-engine-worker:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-rule-engine-service:${RULE_ENGINE_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: rule-engine-worker
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if r.ping() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    environment:
+      - APP_ROLE=worker
+      - DATABASE_URL=${DATABASE_URL}
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - EMAIL_ENABLED=${EMAIL_ENABLED:-true}
+      - EMAIL_SMTP_HOST=${EMAIL_SMTP_HOST:-${SMTP_SERVER:-smtp.gmail.com}}
+      - EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT:-587}
+      - EMAIL_SMTP_USERNAME=${EMAIL_SMTP_USERNAME:-${EMAIL_SENDER:-}}
+      - EMAIL_SMTP_PASSWORD=${EMAIL_SMTP_PASSWORD:-${EMAIL_PASSWORD:-}}
+      - EMAIL_FROM_ADDRESS=${EMAIL_FROM_ADDRESS:-${EMAIL_SENDER:-alerts@energy-platform.com}}
+      - SMS_ENABLED=${SMS_ENABLED:-false}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_SMS_FROM_NUMBER=${TWILIO_SMS_FROM_NUMBER:-}
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
+      - TWILIO_WHATSAPP_FROM_NUMBER=${TWILIO_WHATSAPP_FROM_NUMBER:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+      - QUEUE_BACKEND=redis
+      - NOTIFICATION_WORKER_CONCURRENCY=4
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  analytics-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-analytics-api:${ANALYTICS_API_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: analytics-service
+    restart: unless-stopped
+    environment:
+      - APP_ROLE=api
+      - APP_ENV=${ENVIRONMENT:-production}
+      - UVICORN_WORKERS=${ANALYTICS_API_UVICORN_WORKERS:-1}
+      - LOG_LEVEL=INFO
+      - API_PORT=8003
+      - DATABASE_URL=${DATABASE_URL}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - S3_ENDPOINT_URL=${AWS_ENDPOINT_URL_S3:-}
+      - S3_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - S3_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-energy-platform-datasets}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - QUEUE_BACKEND=redis
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - REDIS_STREAM_NAME=analytics_jobs_stream
+      - REDIS_DEAD_LETTER_STREAM=analytics_jobs_dead_letter
+      - REDIS_CONSUMER_GROUP=analytics_workers
+      - REDIS_CONSUMER_NAME=analytics-api
+      - MAX_CONCURRENT_JOBS=1
+      - GLOBAL_ACTIVE_JOB_LIMIT=48
+      - QUEUE_MAX_LENGTH=10000
+      - QUEUE_BACKLOG_REJECT_THRESHOLD=500
+      - TENANT_MAX_QUEUED_JOBS=25
+      - TENANT_MAX_ACTIVE_JOBS=8
+      - STALE_SCAN_INTERVAL_SECONDS=30
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    expose:
+      - "8003"
+    ports:
+      - "${ANALYTICS_SERVICE_HOST_BIND:-127.0.0.1}:${ANALYTICS_SERVICE_HOST_PORT:-8003}:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  analytics-worker:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-analytics-worker:${ANALYTICS_WORKER_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: analytics-worker
+    restart: unless-stopped
+    environment:
+      - APP_ROLE=worker
+      - APP_ENV=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - API_PORT=8003
+      - DATABASE_URL=${DATABASE_URL}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - S3_ENDPOINT_URL=${AWS_ENDPOINT_URL_S3:-}
+      - S3_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - S3_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-energy-platform-datasets}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - QUEUE_BACKEND=redis
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - REDIS_STREAM_NAME=analytics_jobs_stream
+      - REDIS_DEAD_LETTER_STREAM=analytics_jobs_dead_letter
+      - REDIS_CONSUMER_GROUP=analytics_workers
+      - REDIS_CONSUMER_NAME=analytics-worker-1
+      - MAX_CONCURRENT_JOBS=1
+      - GLOBAL_ACTIVE_JOB_LIMIT=48
+      - QUEUE_MAX_LENGTH=10000
+      - QUEUE_BACKLOG_REJECT_THRESHOLD=500
+      - TENANT_MAX_QUEUED_JOBS=25
+      - TENANT_MAX_ACTIVE_JOBS=8
+      - STALE_SCAN_INTERVAL_SECONDS=30
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - ML_WEEKLY_RETRAINER_ENABLED=true
+    depends_on:
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if r.ping() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  analytics-worker-2:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-analytics-worker:${ANALYTICS_WORKER_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: analytics-worker-2
+    restart: unless-stopped
+    environment:
+      - APP_ROLE=worker
+      - APP_ENV=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - API_PORT=8003
+      - DATABASE_URL=${DATABASE_URL}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - S3_ENDPOINT_URL=${AWS_ENDPOINT_URL_S3:-}
+      - S3_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - S3_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-energy-platform-datasets}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - QUEUE_BACKEND=redis
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - REDIS_STREAM_NAME=analytics_jobs_stream
+      - REDIS_DEAD_LETTER_STREAM=analytics_jobs_dead_letter
+      - REDIS_CONSUMER_GROUP=analytics_workers
+      - REDIS_CONSUMER_NAME=analytics-worker-2
+      - MAX_CONCURRENT_JOBS=1
+      - GLOBAL_ACTIVE_JOB_LIMIT=48
+      - QUEUE_MAX_LENGTH=10000
+      - QUEUE_BACKLOG_REJECT_THRESHOLD=500
+      - TENANT_MAX_QUEUED_JOBS=25
+      - TENANT_MAX_ACTIVE_JOBS=8
+      - STALE_SCAN_INTERVAL_SECONDS=30
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - ML_WEEKLY_RETRAINER_ENABLED=false
+    depends_on:
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if r.ping() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  data-export-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-data-export-service:${DATA_EXPORT_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: data-export-service
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - UVICORN_WORKERS=${REPORTING_SERVICE_UVICORN_WORKERS:-1}
+      - LOG_LEVEL=INFO
+      - PORT=8080
+      - HOST=0.0.0.0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - S3_ENDPOINT_URL=${AWS_ENDPOINT_URL_S3:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET=${S3_BUCKET:-energy-platform-datasets}
+      - CHECKPOINT_DB_HOST=${MYSQL_HOST}
+      - CHECKPOINT_DB_PORT=${MYSQL_PORT}
+      - CHECKPOINT_DB_NAME=${MYSQL_DATABASE}
+      - CHECKPOINT_DB_USER=${MYSQL_USER}
+      - CHECKPOINT_DB_PASSWORD=${MYSQL_PASSWORD}
+      - DATA_SERVICE_URL=http://data-service:8081
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+    expose:
+      - "8080"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  reporting-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-reporting-service:${REPORTING_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: reporting-service
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - UVICORN_WORKERS=${WASTE_ANALYSIS_SERVICE_UVICORN_WORKERS:-1}
+      - LOG_LEVEL=INFO
+      - PORT=8085
+      - HOST=0.0.0.0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MINIO_ACCESS_KEY=${AWS_ACCESS_KEY_ID:-}
+      - MINIO_SECRET_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - MINIO_BUCKET=${MINIO_BUCKET:-energy-platform-datasets}
+      - MINIO_EXTERNAL_URL=${MINIO_EXTERNAL_URL:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-energy-platform-datasets}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-}
+      - AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL_S3:-}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - LOCAL_BOOTSTRAP_ENABLED=${LOCAL_BOOTSTRAP_ENABLED:-false}
+      - LOCAL_BOOTSTRAP_TENANT_ID=${LOCAL_BOOTSTRAP_TENANT_ID:-SH00000001}
+      - LOCAL_BOOTSTRAP_TARIFF_RATE=${LOCAL_BOOTSTRAP_TARIFF_RATE:-8.0}
+      - LOCAL_BOOTSTRAP_TARIFF_CURRENCY=${LOCAL_BOOTSTRAP_TARIFF_CURRENCY:-INR}
+      - LOCAL_BOOTSTRAP_TARIFF_DEMAND_CHARGE_PER_KW=${LOCAL_BOOTSTRAP_TARIFF_DEMAND_CHARGE_PER_KW:-0.0}
+      - LOCAL_BOOTSTRAP_TARIFF_REACTIVE_PENALTY_RATE=${LOCAL_BOOTSTRAP_TARIFF_REACTIVE_PENALTY_RATE:-0.0}
+      - LOCAL_BOOTSTRAP_TARIFF_FIXED_MONTHLY_CHARGE=${LOCAL_BOOTSTRAP_TARIFF_FIXED_MONTHLY_CHARGE:-0.0}
+      - LOCAL_BOOTSTRAP_TARIFF_POWER_FACTOR_THRESHOLD=${LOCAL_BOOTSTRAP_TARIFF_POWER_FACTOR_THRESHOLD:-0.9}
+      - LOCAL_BOOTSTRAP_TARIFF_EFFECTIVE_START_AT=${LOCAL_BOOTSTRAP_TARIFF_EFFECTIVE_START_AT:-2026-01-01T00:00:00+00:00}
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    expose:
+      - "8085"
+    ports:
+      - "${REPORTING_SERVICE_HOST_BIND:-127.0.0.1}:${REPORTING_SERVICE_HOST_PORT:-8085}:8085"
+    depends_on:
+      energy-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8085/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  reporting-worker:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-reporting-service:${REPORTING_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: reporting-worker
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if r.ping() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    environment:
+      - APP_ROLE=worker
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - QUEUE_BACKEND=redis
+      - REPORT_WORKER_CONCURRENCY=2
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MINIO_ACCESS_KEY=${AWS_ACCESS_KEY_ID:-}
+      - MINIO_SECRET_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - MINIO_BUCKET=${MINIO_BUCKET:-energy-platform-datasets}
+      - MINIO_EXTERNAL_URL=${MINIO_EXTERNAL_URL:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-energy-platform-datasets}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-}
+      - AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL_S3:-}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    depends_on:
+      redis:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  waste-analysis-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-waste-analysis-service:${WASTE_ANALYSIS_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: waste-analysis-service
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - PORT=8087
+      - HOST=0.0.0.0
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - MINIO_ACCESS_KEY=${AWS_ACCESS_KEY_ID:-}
+      - MINIO_SECRET_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - MINIO_BUCKET=${MINIO_BUCKET:-energy-platform-datasets}
+      - MINIO_EXTERNAL_URL=${MINIO_EXTERNAL_URL:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - REPORTING_SERVICE_URL=http://reporting-service:8085
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - INFLUX_AGGREGATION_WINDOW=5m
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    expose:
+      - "8087"
+    ports:
+      - "${WASTE_ANALYSIS_SERVICE_HOST_BIND:-127.0.0.1}:${WASTE_ANALYSIS_SERVICE_HOST_PORT:-8087}:8087"
+    depends_on:
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    networks:
+      - energy-net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8087/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  waste-analysis-worker:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-waste-analysis-service:${WASTE_ANALYSIS_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: waste-analysis-worker
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, redis, sys; r=redis.Redis.from_url(os.environ['REDIS_URL']); sys.exit(0 if r.ping() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    environment:
+      - APP_ROLE=worker
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - WASTE_QUEUE_BACKEND=redis
+      - WASTE_WORKER_CONCURRENCY=2
+      - MINIO_ACCESS_KEY=${AWS_ACCESS_KEY_ID:-}
+      - MINIO_SECRET_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - MINIO_BUCKET=${MINIO_BUCKET:-energy-platform-datasets}
+      - MINIO_EXTERNAL_URL=${MINIO_EXTERNAL_URL:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - REPORTING_SERVICE_URL=http://reporting-service:8085
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8090}
+    depends_on:
+      redis:
+        condition: service_healthy
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  copilot-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-copilot-service:${COPILOT_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: copilot-service
+    restart: unless-stopped
+    environment:
+      - APP_NAME=copilot-service
+      - LOG_LEVEL=${COPILOT_LOG_LEVEL:-INFO}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER:-groq}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MYSQL_URL=mysql+aiomysql://copilot_reader:${COPILOT_DB_PASSWORD:-copilot_readonly_pass}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}
+      - MYSQL_READONLY_URL=mysql+aiomysql://copilot_reader:${COPILOT_DB_PASSWORD:-copilot_readonly_pass}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}
+      - DATA_SERVICE_URL=http://data-service:8081
+      - REPORTING_SERVICE_URL=http://reporting-service:8085
+      - ENERGY_SERVICE_URL=http://energy-service:8010
+      - FACTORY_TIMEZONE=${PLATFORM_TIMEZONE:-Asia/Kolkata}
+      - MAX_QUERY_ROWS=200
+      - QUERY_TIMEOUT_SEC=10
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - INTERNAL_SERVICE_SHARED_SECRET=${INTERNAL_SERVICE_SHARED_SECRET}
+    expose:
+      - "8007"
+    ports:
+      - "${COPILOT_SERVICE_HOST_BIND:-127.0.0.1}:${COPILOT_SERVICE_HOST_PORT:-8007}:8007"
+    depends_on:
+      data-service:
+        condition: service_started
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    networks:
+      - energy-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  auth-service:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-auth-service:${AUTH_SERVICE_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: auth-service
+    restart: unless-stopped
+    expose:
+      - "8090"
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-}@redis:6379/0"
+      MYSQL_HOST: "${MYSQL_HOST}"
+      MYSQL_PORT: "${MYSQL_PORT}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
+      INTERNAL_SERVICE_SHARED_SECRET: "${INTERNAL_SERVICE_SHARED_SECRET}"
+      JWT_ALGORITHM: "HS256"
+      ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+      REFRESH_TOKEN_EXPIRE_DAYS: "7"
+      EMAIL_ENABLED: "${EMAIL_ENABLED:-true}"
+      EMAIL_SMTP_HOST: "${EMAIL_SMTP_HOST:-${SMTP_SERVER:-smtp.gmail.com}}"
+      EMAIL_SMTP_PORT: "${EMAIL_SMTP_PORT:-587}"
+      EMAIL_SMTP_USERNAME: "${EMAIL_SMTP_USERNAME:-${EMAIL_SENDER:-}}"
+      EMAIL_SMTP_PASSWORD: "${EMAIL_SMTP_PASSWORD:-${EMAIL_PASSWORD:-}}"
+      EMAIL_FROM_ADDRESS: "${EMAIL_FROM_ADDRESS:-${EMAIL_SENDER:-alerts@energy-platform.com}}"
+      FRONTEND_BASE_URL: "${FRONTEND_BASE_URL:-}"
+      DEVICE_SERVICE_BASE_URL: "${DEVICE_SERVICE_BASE_URL:-http://device-service:8000}"
+      # Bootstrap paths are explicit opt-in only and remain false by default.
+      BOOTSTRAP_SUPER_ADMIN_ENABLED: "${BOOTSTRAP_SUPER_ADMIN_ENABLED:-false}"
+      BOOTSTRAP_SUPER_ADMIN_EMAIL: "${BOOTSTRAP_SUPER_ADMIN_EMAIL:-}"
+      BOOTSTRAP_SUPER_ADMIN_PASSWORD: "${BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}"
+      BOOTSTRAP_SUPER_ADMIN_FULL_NAME: "${BOOTSTRAP_SUPER_ADMIN_FULL_NAME:-}"
+      LOCAL_BOOTSTRAP_ENABLED: "${LOCAL_BOOTSTRAP_ENABLED:-false}"
+      LOCAL_BOOTSTRAP_TENANT_ID: "${LOCAL_BOOTSTRAP_TENANT_ID:-SH00000001}"
+      LOCAL_BOOTSTRAP_TENANT_NAME: "${LOCAL_BOOTSTRAP_TENANT_NAME:-Shivex Demo Tenant}"
+      LOCAL_BOOTSTRAP_TENANT_SLUG: "${LOCAL_BOOTSTRAP_TENANT_SLUG:-shivex-demo}"
+      LOCAL_BOOTSTRAP_PLANT_ID: "${LOCAL_BOOTSTRAP_PLANT_ID:-demo-plant}"
+      LOCAL_BOOTSTRAP_PLANT_NAME: "${LOCAL_BOOTSTRAP_PLANT_NAME:-Demo Plant}"
+      LOCAL_BOOTSTRAP_PLANT_LOCATION: "${LOCAL_BOOTSTRAP_PLANT_LOCATION:-Local Demo Plant}"
+      LOCAL_BOOTSTRAP_PLANT_TIMEZONE: "${LOCAL_BOOTSTRAP_PLANT_TIMEZONE:-Asia/Kolkata}"
+      LOCAL_BOOTSTRAP_PREMIUM_FEATURES: "${LOCAL_BOOTSTRAP_PREMIUM_FEATURES:-reports,waste_analysis,copilot,analytics}"
+      INVITE_TOKEN_EXPIRE_MINUTES: "30"
+      PASSWORD_RESET_EXPIRE_MINUTES: "30"
+      LOGIN_RATE_LIMIT: "${LOGIN_RATE_LIMIT:-120/minute}"
+      PASSWORD_FORGOT_RATE_LIMIT: "${PASSWORD_FORGOT_RATE_LIMIT:-30/minute}"
+      INVITATION_ACCEPT_RATE_LIMIT: "${INVITATION_ACCEPT_RATE_LIMIT:-30/minute}"
+      SERVICE_HOST: "0.0.0.0"
+      SERVICE_PORT: "8090"
+      UVICORN_WORKERS: "${AUTH_SERVICE_UVICORN_WORKERS:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      SQLALCHEMY_ECHO: "${SQLALCHEMY_ECHO:-false}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  ui-web:
+    image: ghcr.io/${GHCR_OWNER_LOWER:-cittagent}/${GHCR_REPO_LOWER:-shivex-main-1}-ui-web:${UI_WEB_IMAGE_TAG:-${APP_IMAGE_TAG:-main}}
+    container_name: ui-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - device-service
+      - data-service
+      - rule-engine-service
+      - analytics-service
+      - data-export-service
+      - waste-analysis-service
+      - copilot-service
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r=>{process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - energy-net
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://shivex.ai}
+
+  telemetry-simulator:
+    build: ./tools/device-simulator
+    container_name: telemetry-simulator
+    environment:
+      - DEVICE_ID=${DEVICE_ID:-COMPRESSOR-001}
+      - TENANT_ID=${TENANT_ID:-SH00000001}
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - AUTH_SERVICE_URL=http://auth-service:8090
+      - MQTT_CREDENTIAL_BOOTSTRAP_EMAIL=${BOOTSTRAP_SUPER_ADMIN_EMAIL:-}
+      - MQTT_CREDENTIAL_BOOTSTRAP_PASSWORD=${BOOTSTRAP_SUPER_ADMIN_PASSWORD:-}
+    depends_on:
+      emqx:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      data-service:
+        condition: service_healthy
+    networks:
+      - energy-net
+    profiles:
+      - demo
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: prometheus
+    profiles:
+      - monitoring
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - device-service
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    profiles:
+      - monitoring
+    environment:
+      ALERTMANAGER_EXTERNAL_URL: ${ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-${EMAIL_SMTP_HOST:-${SMTP_SERVER:-smtp.gmail.com}}}
+      ALERT_SMTP_PORT: ${ALERT_SMTP_PORT:-${EMAIL_SMTP_PORT:-587}}
+      ALERT_SMTP_FROM: ${ALERT_SMTP_FROM:-${EMAIL_FROM_ADDRESS:-${EMAIL_SENDER:-alerts@shivex.ai}}}
+      ALERT_SMTP_USERNAME: ${ALERT_SMTP_USERNAME:-${EMAIL_SMTP_USERNAME:-${EMAIL_SENDER:-}}}
+      ALERT_SMTP_PASSWORD: ${ALERT_SMTP_PASSWORD:-${EMAIL_SMTP_PASSWORD:-${EMAIL_PASSWORD:-}}}
+      ALERT_SMTP_TO: ${ALERT_SMTP_TO:-ops@shivex.ai}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed \
+          -e "s|__ALERT_SMTP_HOST__|$$ALERT_SMTP_HOST|g" \
+          -e "s|__ALERT_SMTP_PORT__|$$ALERT_SMTP_PORT|g" \
+          -e "s|__ALERT_SMTP_FROM__|$$ALERT_SMTP_FROM|g" \
+          -e "s|__ALERT_SMTP_USERNAME__|$$ALERT_SMTP_USERNAME|g" \
+          -e "s|__ALERT_SMTP_PASSWORD__|$$ALERT_SMTP_PASSWORD|g" \
+          -e "s|__ALERT_SMTP_TO__|$$ALERT_SMTP_TO|g" \
+          /etc/alertmanager/alertmanager.yml > /tmp/alertmanager.yml \
+          && /bin/alertmanager --config.file=/tmp/alertmanager.yml \
+             --web.external-url=$$ALERTMANAGER_EXTERNAL_URL \
+             --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    container_name: grafana
+    profiles:
+      - monitoring
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin123}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.0
+    container_name: node-exporter
+    profiles:
+      - monitoring
+    command:
+      - "--path.rootfs=/host"
+      - "--path.procfs=/hostproc"
+      - "--path.sysfs=/hostsys"
+    volumes:
+      - /:/host:ro
+      - /proc:/hostproc:ro
+      - /sys:/hostsys:ro
+    expose:
+      - "9100"
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: redis-exporter
+    profiles:
+      - monitoring
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: blackbox-exporter
+    profiles:
+      - monitoring
+    volumes:
+      - ./monitoring/blackbox-exporter/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    expose:
+      - "9115"
+    networks:
+      - energy-net
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 16M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  energy-net:
+    driver: bridge
+
+volumes:
+  influxdb_data:
+  emqx_data:
+  emqx_log:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:

@@ -1,0 +1,34 @@
+{
+  "Rules": [
+    {
+      "ID": "report-artifacts-expire-90d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "reports/"
+      },
+      "Expiration": {
+        "Days": 90
+      }
+    },
+    {
+      "ID": "waste-artifacts-expire-90d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "waste-reports/"
+      },
+      "Expiration": {
+        "Days": 90
+      }
+    },
+    {
+      "ID": "analytics-datasets-expire-30d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "datasets/"
+      },
+      "Expiration": {
+        "Days": 30
+      }
+    }
+  ]
+}

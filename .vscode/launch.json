@@ -1,0 +1,135 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Attach auth-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5671 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/auth-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach device-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5672 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/device-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach energy-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5673 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/energy-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach data-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5674 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/data-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach data-telemetry-worker",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5675 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/data-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach data-telemetry-worker-2",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5676 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/data-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach rule-engine-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5677 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/rule-engine-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach rule-engine-worker",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5678 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/rule-engine-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach analytics-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5679 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/analytics-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach analytics-worker",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5680 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/analytics-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach analytics-worker-2",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5681 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/analytics-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach reporting-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5682 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/reporting-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach reporting-worker",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5683 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/reporting-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach waste-analysis-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5684 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/waste-analysis-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach copilot-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5685 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/copilot-service", "remoteRoot": "/app" }]
+        },
+        {
+            "name": "Attach data-export-service API",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5686 },
+            "pathMappings": [{ "localRoot": "${workspaceFolder}/services/data-export-service", "remoteRoot": "/app" }]
+        }
+    ],
+    "compounds": [
+        {
+            "name": "data-service full (API + worker-1)",
+            "configurations": ["Attach data-service API", "Attach data-telemetry-worker"]
+        },
+        {
+            "name": "rule-engine full (API + worker)",
+            "configurations": ["Attach rule-engine-service API", "Attach rule-engine-worker"]
+        },
+        {
+            "name": "analytics full (API + worker-1)",
+            "configurations": ["Attach analytics-service API", "Attach analytics-worker"]
+        },
+        {
+            "name": "reporting full (API + worker)",
+            "configurations": ["Attach reporting-service API", "Attach reporting-worker"]
+        }
+    ]
+}

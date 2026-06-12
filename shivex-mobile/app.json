@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Shivex",
+    "slug": "shivex",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "backgroundColor": "#080a0e"
+    },
+    "android": {
+      "package": "com.shivex.app",
+      "versionCode": 1,
+      "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "backgroundColor": "#080a0e"
+      }
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "scheme": "shivex",
+    "extra": {
+      "apiBaseUrl": "https://shivex.ai",
+      "router": {},
+      "eas": {
+        "projectId": "fcd6824a-f0f9-48e2-9779-994fb54cbb09"
+      }
+    },
+    "owner": "cittagent-1"
+  }
+}

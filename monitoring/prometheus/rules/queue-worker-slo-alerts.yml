@@ -1,0 +1,260 @@
+groups:
+  - name: analytics-queue-slo
+    rules:
+      - alert: AnalyticsQueueDepthHigh
+        expr: analytics_queue_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: analytics-service
+        annotations:
+          summary: "Analytics queue depth elevated"
+          description: "Analytics pending jobs {{ $value }} (>100) for 5 minutes."
+
+      - alert: AnalyticsQueueDepthCritical
+        expr: analytics_queue_depth > 400
+        for: 2m
+        labels:
+          severity: critical
+          service: analytics-service
+        annotations:
+          summary: "Analytics queue depth critical"
+          description: "Analytics pending jobs {{ $value }} (>400) for 2 minutes."
+
+      - alert: AnalyticsDeadLetterSpike
+        expr: increase(analytics_dead_letter_events_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: analytics-service
+        annotations:
+          summary: "Analytics dead-letter messages arriving"
+          description: "{{ $value }} new dead-letter messages in 5 minutes."
+
+      - alert: AnalyticsRetrySpike
+        expr: increase(analytics_retry_events_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: analytics-service
+        annotations:
+          summary: "Analytics retry events elevated"
+          description: "{{ $value }} job retries in 5 minutes."
+
+      - alert: AnalyticsNoActiveWorkers
+        expr: analytics_active_workers == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: analytics-service
+        annotations:
+          summary: "No active analytics workers"
+          description: "Zero workers have reported a heartbeat in the TTL window."
+
+      - alert: AnalyticsTenantCapRejections
+        expr: increase(analytics_rejected_tenant_cap_total[10m]) > 20
+        for: 2m
+        labels:
+          severity: warning
+          service: analytics-service
+        annotations:
+          summary: "High tenant-cap rejection rate"
+          description: "{{ $value }} submissions rejected by tenant cap in 10 minutes."
+
+      - alert: AnalyticsOverloadRejections
+        expr: increase(analytics_rejected_overloaded_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: analytics-service
+        annotations:
+          summary: "Analytics overload rejections"
+          description: "{{ $value }} submissions rejected by backlog overload in 5 minutes."
+
+  - name: reporting-queue-slo
+    rules:
+      - alert: ReportingQueueDepthHigh
+        expr: reporting_queue_depth > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: reporting-service
+        annotations:
+          summary: "Reporting queue depth elevated"
+          description: "Reporting queue depth {{ $value }} (>50) for 5 minutes."
+
+      - alert: ReportingDeadLetterSpike
+        expr: increase(reporting_dead_letter_events_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: reporting-service
+        annotations:
+          summary: "Reporting dead-letter messages arriving"
+          description: "{{ $value }} new dead-letter messages in 5 minutes."
+
+      - alert: ReportingTimeoutSpike
+        expr: increase(reporting_timeout_events_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: reporting-service
+        annotations:
+          summary: "Reporting timeout events elevated"
+          description: "{{ $value }} job timeouts in 5 minutes."
+
+      - alert: ReportingRetrySpike
+        expr: increase(reporting_retry_events_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: reporting-service
+        annotations:
+          summary: "Reporting retry events elevated"
+          description: "{{ $value }} job retries in 5 minutes."
+
+      - alert: ReportingNoActiveWorkers
+        expr: reporting_active_workers == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: reporting-service
+        annotations:
+          summary: "No active reporting workers"
+          description: "Zero workers have reported a heartbeat."
+
+  - name: waste-queue-slo
+    rules:
+      - alert: WasteQueueDepthHigh
+        expr: waste_queue_depth > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: waste-analysis-service
+        annotations:
+          summary: "Waste queue depth elevated"
+          description: "Waste queue depth {{ $value }} (>50) for 5 minutes."
+
+      - alert: WasteDeadLetterSpike
+        expr: increase(waste_dead_letter_events_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: waste-analysis-service
+        annotations:
+          summary: "Waste dead-letter messages arriving"
+          description: "{{ $value }} new dead-letter messages in 5 minutes."
+
+      - alert: WasteTimeoutSpike
+        expr: increase(waste_timeout_events_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: waste-analysis-service
+        annotations:
+          summary: "Waste timeout events elevated"
+          description: "{{ $value }} job timeouts in 5 minutes."
+
+      - alert: WasteRetrySpike
+        expr: increase(waste_retry_events_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: waste-analysis-service
+        annotations:
+          summary: "Waste retry events elevated"
+          description: "{{ $value }} job retries in 5 minutes."
+
+      - alert: WasteNoActiveWorkers
+        expr: waste_active_workers == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: waste-analysis-service
+        annotations:
+          summary: "No active waste-analysis workers"
+          description: "Zero workers have reported a heartbeat."
+
+  - name: rule-engine-queue-slo
+    rules:
+      - alert: RuleEngineQueueDepthHigh
+        expr: rule_engine_queue_depth > 200
+        for: 5m
+        labels:
+          severity: warning
+          service: rule-engine-service
+        annotations:
+          summary: "Rule engine notification queue depth elevated"
+          description: "Queue depth {{ $value }} (>200) for 5 minutes."
+
+      - alert: RuleEngineDeadLetterSpike
+        expr: increase(rule_engine_dead_letter_events_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          service: rule-engine-service
+        annotations:
+          summary: "Rule engine dead-letter messages arriving"
+          description: "{{ $value }} new dead-letter messages in 5 minutes."
+
+      - alert: RuleEngineRetrySpike
+        expr: increase(rule_engine_retry_events_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: rule-engine-service
+        annotations:
+          summary: "Rule engine retry events elevated"
+          description: "{{ $value }} notification retries in 5 minutes."
+
+      - alert: RuleEngineNoActiveWorkers
+        expr: rule_engine_active_workers == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: rule-engine-service
+        annotations:
+          summary: "No active rule-engine workers"
+          description: "Zero workers have reported a heartbeat."
+
+  - name: telemetry-pipeline-slo
+    rules:
+      - alert: TelemetryBacklogDepthHigh
+        expr: telemetry_stage_backlog_depth > 50000
+        for: 5m
+        labels:
+          severity: warning
+          service: data-service
+        annotations:
+          summary: "Telemetry pipeline stage backlog high"
+          description: "Stage {{ $labels.queue_name }} backlog {{ $value }} (>50000)."
+
+      - alert: TelemetryBacklogDepthCritical
+        expr: telemetry_stage_backlog_depth > 150000
+        for: 2m
+        labels:
+          severity: critical
+          service: data-service
+        annotations:
+          summary: "Telemetry pipeline stage backlog critical"
+          description: "Stage {{ $labels.queue_name }} backlog {{ $value }} (>150000)."
+
+      - alert: TelemetryRejectedSpike
+        expr: increase(telemetry_rejected_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: critical
+          service: data-service
+        annotations:
+          summary: "Telemetry rejections spiking"
+          description: "{{ $value }} rejections in 5 minutes on {{ $labels.queue_name }}."
+
+      - alert: TelemetryStageLagHigh
+        expr: telemetry_stage_oldest_age_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+          service: data-service
+        annotations:
+          summary: "Telemetry stage lag elevated"
+          description: "Stage {{ $labels.queue_name }} oldest item age {{ $value }}s (>60s)."

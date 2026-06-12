@@ -1,0 +1,67 @@
+groups:
+  - name: host-health
+    rules:
+      - alert: HostCPUHigh
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU usage high"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% (>80%) on {{ $labels.instance }} for 5 minutes."
+
+      - alert: HostCPUCritical
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host CPU usage critical"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% (>95%) on {{ $labels.instance }} for 2 minutes."
+
+      - alert: HostMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory usage high"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}% (>85%) on {{ $labels.instance }} for 5 minutes."
+
+      - alert: HostMemoryCritical
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host memory usage critical"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}% (>95%) on {{ $labels.instance }} for 2 minutes."
+
+      - alert: HostDiskUsageHigh
+        expr: (1 - node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"}) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host disk usage high"
+          description: "Disk usage on {{ $labels.mountpoint }} is {{ $value | printf \"%.1f\" }}% (>80%) on {{ $labels.instance }} for 5 minutes."
+
+      - alert: HostDiskUsageCritical
+        expr: (1 - node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs|zfs"}) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host disk usage critical"
+          description: "Disk usage on {{ $labels.mountpoint }} is {{ $value | printf \"%.1f\" }}% (>95%) on {{ $labels.instance }} for 2 minutes."
+
+  - name: service-health
+    rules:
+      - alert: ServiceTargetDown
+        expr: up{job!~"prometheus"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scrape target {{ $labels.job }} is down"
+          description: "Prometheus cannot reach {{ $labels.job }} at {{ $labels.instance }} for over 1 minute."

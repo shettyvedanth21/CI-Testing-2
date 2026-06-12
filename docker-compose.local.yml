@@ -1,0 +1,489 @@
+# Local-only infrastructure and overrides. Use together with docker-compose.yml:
+# docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.local.yml up -d --build
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: energy_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_USER: energy
+      MYSQL_PASSWORD: energy
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-scripts/mysql:/docker-entrypoint-initdb.d
+      - ./ops/mysql/conf.d:/etc/mysql/conf.d:ro
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "energy", "-penergy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 minio minio123;
+      /usr/bin/mc mb -p local/energy-platform-datasets;
+      exit 0;
+      "
+    networks:
+      - energy-net
+
+  emqx:
+    volumes: !override
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+      - ./ops/emqx/local.base.hocon:/opt/emqx/etc/emqx.conf:ro
+
+  device-service:
+    build:
+      context: .
+      dockerfile: services/device-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - DEVICE_SERVICE_RUNTIME=api
+      - DEVICE_SERVICE_ENABLE_FLEET_STREAM=true
+      - DEVICE_SERVICE_RUN_STARTUP_MAINTENANCE=false
+      - DEVICE_SERVICE_RUN_EMBEDDED_SCHEDULERS=false
+      - BOOTSTRAP_DEMO_DEVICES=true
+      - BOOTSTRAP_DEMO_TENANT_ID=SH00000001
+      - BOOTSTRAP_DEMO_PLANT_ID=demo-plant
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  device-service-backfill:
+    build:
+      context: .
+      dockerfile: services/device-service/Dockerfile
+    entrypoint: ["python", "scripts/backfill_local_validation.py"]
+    environment:
+      - LOCAL_BACKFILL_ENABLED=true
+      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/ai_factoryops
+    depends_on:
+      mysql:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - energy-net
+
+  device-service-scheduler:
+    build:
+      context: .
+      dockerfile: services/device-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - DEVICE_SERVICE_RUNTIME=scheduler
+      - DEVICE_SERVICE_ENABLE_FLEET_STREAM=false
+      - DEVICE_SERVICE_RUN_STARTUP_MAINTENANCE=true
+      - DEVICE_SERVICE_RUN_EMBEDDED_SCHEDULERS=true
+      - BOOTSTRAP_DEMO_DEVICES=false
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      device-service-backfill:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import sys; sys.exit(0 if 'app.scheduler_runner' in Path('/proc/1/cmdline').read_text().replace('\\x00', ' ') else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  energy-service:
+    build:
+      context: .
+      dockerfile: services/energy-service/Dockerfile
+    ports:
+      - "${ENERGY_SERVICE_HOST_BIND:-127.0.0.1}:${ENERGY_SERVICE_HOST_PORT:-8010}:8010"
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+
+  data-service:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  data-telemetry-worker:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      rule-engine-service:
+        condition: service_healthy
+
+  data-telemetry-worker-2:
+    build:
+      context: .
+      dockerfile: services/data-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      rule-engine-service:
+        condition: service_healthy
+
+  rule-engine-service:
+    build:
+      context: .
+      dockerfile: services/rule-engine-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  rule-engine-worker:
+    build:
+      context: .
+      dockerfile: services/rule-engine-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: api
+    environment:
+      - APP_ENV=development
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=minio
+      - S3_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  analytics-worker:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: worker
+    environment:
+      - APP_ENV=development
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=minio
+      - S3_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_started
+
+  analytics-worker-2:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+      target: worker
+    environment:
+      - APP_ENV=development
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=minio
+      - S3_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_started
+
+  data-export-service:
+    build:
+      context: .
+      dockerfile: services/data-export-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET=energy-platform-datasets
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+  reporting-service:
+    build:
+      context: .
+      dockerfile: services/reporting-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - LOCAL_BOOTSTRAP_ENABLED=true
+      - LOCAL_BOOTSTRAP_TENANT_ID=SH00000001
+      - LOCAL_BOOTSTRAP_TARIFF_RATE=8.0
+      - LOCAL_BOOTSTRAP_TARIFF_CURRENCY=INR
+      - LOCAL_BOOTSTRAP_TARIFF_DEMAND_CHARGE_PER_KW=0.0
+      - LOCAL_BOOTSTRAP_TARIFF_REACTIVE_PENALTY_RATE=0.0
+      - LOCAL_BOOTSTRAP_TARIFF_FIXED_MONTHLY_CHARGE=0.0
+      - LOCAL_BOOTSTRAP_TARIFF_POWER_FACTOR_THRESHOLD=0.9
+      - LOCAL_BOOTSTRAP_TARIFF_EFFECTIVE_START_AT=2026-01-01T00:00:00+00:00
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio123
+      - MINIO_BUCKET=energy-platform-datasets
+      - MINIO_EXTERNAL_URL=http://localhost:9000
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+      - AWS_ENDPOINT_URL=http://minio:9000
+      - AWS_ENDPOINT_URL_S3=http://minio:9000
+      - MINIO_ENDPOINT=minio:9000
+      - REPORTS_CANONICAL_FINANCIAL_APPLY_ENABLED=true
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+
+  reporting-worker:
+    build:
+      context: .
+      dockerfile: services/reporting-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio123
+      - MINIO_BUCKET=energy-platform-datasets
+      - MINIO_EXTERNAL_URL=http://localhost:9000
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+      - AWS_ENDPOINT_URL=http://minio:9000
+      - AWS_ENDPOINT_URL_S3=http://minio:9000
+      - MINIO_ENDPOINT=minio:9000
+      - REPORTS_CANONICAL_FINANCIAL_APPLY_ENABLED=true
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+
+  waste-analysis-service:
+    build:
+      context: .
+      dockerfile: services/waste-analysis-service/Dockerfile
+    environment:
+      - ENVIRONMENT=development
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio123
+      - MINIO_BUCKET=energy-platform-datasets
+      - MINIO_EXTERNAL_URL=http://localhost:9000
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+      - AWS_ENDPOINT_URL=http://minio:9000
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_healthy
+      energy-service:
+        condition: service_healthy
+
+  copilot-service:
+    build:
+      context: .
+      dockerfile: services/copilot-service/Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      data-service:
+        condition: service_started
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_healthy
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    ports:
+      - "${AUTH_SERVICE_HOST_BIND:-127.0.0.1}:${AUTH_SERVICE_HOST_PORT:-8090}:8090"
+    environment:
+      - ENVIRONMENT=development
+      - FRONTEND_BASE_URL=http://localhost:3000
+      - BOOTSTRAP_SUPER_ADMIN_ENABLED=true
+      - LOCAL_BOOTSTRAP_ENABLED=true
+      - LOCAL_BOOTSTRAP_TENANT_ID=SH00000001
+      - LOCAL_BOOTSTRAP_TENANT_NAME=Shivex Demo Tenant
+      - LOCAL_BOOTSTRAP_TENANT_SLUG=shivex-demo
+      - LOCAL_BOOTSTRAP_PLANT_ID=demo-plant
+      - LOCAL_BOOTSTRAP_PLANT_NAME=Demo Plant
+      - LOCAL_BOOTSTRAP_PLANT_LOCATION=Local Demo Plant
+      - LOCAL_BOOTSTRAP_PLANT_TIMEZONE=Asia/Kolkata
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis:
+    ports:
+      - "${REDIS_HOST_BIND:-127.0.0.1}:${REDIS_HOST_PORT:-6379}:6379"
+
+  influxdb:
+    ports:
+      - "${INFLUXDB_HOST_BIND:-127.0.0.1}:${INFLUXDB_HOST_PORT:-8086}:8086"
+
+  ui-web:
+    build:
+      context: ./ui-web
+      dockerfile: Dockerfile
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3000
+
+  local-device-simulator:
+    build: ./tools/device-simulator
+    container_name: local_device_simulator
+    restart: unless-stopped
+    environment:
+      - DEVICE_ID=AD00000001
+      - TENANT_ID=SH00000001
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - AUTH_SERVICE_URL=http://auth-service:8090
+      - MQTT_CREDENTIAL_BOOTSTRAP_EMAIL=${BOOTSTRAP_SUPER_ADMIN_EMAIL}
+      - MQTT_CREDENTIAL_BOOTSTRAP_PASSWORD=${BOOTSTRAP_SUPER_ADMIN_PASSWORD}
+      - PUBLISH_INTERVAL=5
+      - HEARTBEAT_INTERVAL_SEC=20
+      - LOG_LEVEL=INFO
+      - METRICS=voltage,current,power,frequency,power_factor,temperature,voltage_l1,voltage_l2,voltage_l3,current_l1,current_l2,current_l3
+    depends_on:
+      emqx:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      device-service:
+        condition: service_healthy
+      data-service:
+        condition: service_healthy
+    networks:
+      - energy-net
+
+volumes:
+  emqx_data:
+  emqx_log:
+  mysql_data:
+  minio_data:

@@ -1,0 +1,69 @@
+node {
+  name = "emqx@emqx.local"
+  cookie = "emqxsecretcookie"
+  data_dir = "data"
+}
+
+cluster {
+  name = emqxcl
+  discovery_strategy = manual
+}
+
+dashboard {
+  listeners.http {
+    bind = 18083
+  }
+}
+
+authentication = [
+  {
+    backend = "built_in_database"
+    mechanism = "password_based"
+    user_id_type = "username"
+    password_hash_algorithm {
+      name = "sha256"
+      salt_position = "disable"
+    }
+  },
+  {
+    backend = "mysql"
+    mechanism = "password_based"
+    server = "shivex-mysql-prod.cmt486yymn9w.us-east-1.rds.amazonaws.com:3306"
+    database = "ai_factoryops"
+    username = "energy"
+    password = "energy"
+    pool_size = 8
+    query_timeout = "5s"
+    password_hash_algorithm {
+      name = "sha256"
+      salt_position = "disable"
+    }
+    query = "SELECT password_hash, '' AS salt, 0 AS is_superuser FROM device_mqtt_credentials WHERE mqtt_username = ${username} AND is_active = 1 LIMIT 1"
+  }
+]
+
+listeners.tcp.default {
+  bind = "0.0.0.0:1883"
+  enable_authn = quick_deny_anonymous
+}
+
+listeners.wss.default {
+  enable = false
+}
+
+authorization {
+  no_match = deny
+  deny_action = disconnect
+
+  sources = [
+    {
+      type = mysql
+      server = "shivex-mysql-prod.cmt486yymn9w.us-east-1.rds.amazonaws.com:3306"
+      database = "ai_factoryops"
+      username = "energy"
+      password = "energy"
+      pool_size = 8
+      query = "SELECT permission, action, topic FROM (SELECT permission, access AS action, topic, CASE WHEN topic = '#' THEN 2 WHEN topic LIKE '%#%' OR topic LIKE '%+%' THEN 1 ELSE 0 END AS topic_priority, id AS row_priority FROM device_mqtt_acl WHERE mqtt_username = ${username} AND is_active = 1 UNION ALL SELECT 'allow' AS permission, 'subscribe' AS action, 'devices/+/telemetry' AS topic, 1 AS topic_priority, 1000001 AS row_priority WHERE ${username} = 'internal:data-service' AND ${clientid} LIKE 'data-service-%' AND ${peerhost} LIKE '172.21.%' UNION ALL SELECT 'allow' AS permission, 'subscribe' AS action, '+/devices/+/telemetry' AS topic, 1 AS topic_priority, 1000002 AS row_priority WHERE ${username} = 'internal:data-service' AND ${clientid} LIKE 'data-service-%' AND ${peerhost} LIKE '172.21.%') AS acl ORDER BY topic_priority ASC, row_priority ASC"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "dashboard-snapshots-expire-1d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 1
+      }
+    }
+  ]
+}

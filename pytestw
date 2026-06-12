@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${REPO_ROOT}"
+
+if ! command -v python >/dev/null 2>&1; then
+  echo "python not found on PATH" >&2
+  exit 127
+fi
+
+export JWT_SECRET_KEY="${JWT_SECRET_KEY:-test-secret-key-at-least-32-characters-long}"
+
+exec python -m pytest "$@"

@@ -1,0 +1,155 @@
+# Debug overlay for debugger mode. Use together with docker-compose.yml + docker-compose.local.yml:
+#   docker compose --env-file .env.local \
+#     -f docker-compose.yml \
+#     -f docker-compose.local.yml \
+#     -f docker-compose.debug.yml \
+#     up -d --build
+#
+# This file MUST NOT be used in production or committed to .env files.
+# It sets DEBUGPY_ENABLE=true and exposes debug ports for IDE attach.
+# Without this overlay, debugpy is completely disabled in all containers.
+
+services:
+  auth-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5671"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5671:5671"
+
+  device-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5672"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5672:5672"
+
+  energy-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5673"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5673:5673"
+
+  data-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5674"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5674:5674"
+
+  data-telemetry-worker:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5675"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5675:5675"
+
+  data-telemetry-worker-2:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5676"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5676:5676"
+
+  rule-engine-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5677"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5677:5677"
+
+  rule-engine-worker:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5678"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5678:5678"
+
+  analytics-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5679"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5679:5679"
+
+  analytics-worker:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5680"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5680:5680"
+
+  analytics-worker-2:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5681"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5681:5681"
+
+  reporting-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5682"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5682:5682"
+
+  reporting-worker:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5683"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5683:5683"
+
+  waste-analysis-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5684"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5684:5684"
+
+  copilot-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5685"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5685:5685"
+
+  data-export-service:
+    environment:
+      DEBUGPY_ENABLE: "true"
+      DEBUGPY_HOST: "0.0.0.0"
+      DEBUGPY_PORT: "5686"
+      DEBUGPY_WAIT_FOR_CLIENT: "false"
+    ports:
+      - "5686:5686"

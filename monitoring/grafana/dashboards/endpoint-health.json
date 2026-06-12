@@ -1,0 +1,108 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red" },
+                "1": { "text": "UP", "color": "green" }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "probe_success",
+          "refId": "A",
+          "legendFormat": "{{ target_host }}"
+        }
+      ],
+      "title": "Endpoint Status",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "probe_duration_seconds",
+          "refId": "A",
+          "legendFormat": "{{ target_host }}"
+        }
+      ],
+      "title": "Probe Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "avg_over_time(probe_success[1h]) * 100",
+          "refId": "A",
+          "legendFormat": "{{ target_host }}"
+        }
+      ],
+      "title": "Uptime (1h avg %)",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "increase(probe_success{probe_success!=\"1\"}[1h]) > 0 or probe_success == 0",
+          "refId": "A",
+          "legendFormat": "{{ target_host }}"
+        }
+      ],
+      "title": "Recent Failures",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["infrastructure", "blackbox", "endpoint"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Endpoint Health",
+  "uid": "endpoint-health",
+  "version": 1
+}

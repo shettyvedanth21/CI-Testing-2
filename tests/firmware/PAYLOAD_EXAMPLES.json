@@ -1,0 +1,90 @@
+{
+  "valid_minimal": {
+    "description": "Minimum required fields only",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "2026-03-22T10:00:00+00:00"
+    }
+  },
+  "valid_complete": {
+    "description": "Full payload emitted by tests/helpers/simulator.py for the normal telemetry profile",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "2026-03-22T10:00:00+00:00",
+      "schema_version": "v1",
+      "voltage": 231.0,
+      "current": 12.5,
+      "power": 2875.0,
+      "power_factor": 0.97,
+      "energy_kwh": 1200.0
+    }
+  },
+  "invalid_missing_device_id": {
+    "description": "This will be REJECTED - missing device_id",
+    "payload": {
+      "timestamp": "2026-03-22T10:00:00+00:00",
+      "schema_version": "v1",
+      "voltage": 231.0,
+      "current": 12.5,
+      "power": 2875.0,
+      "power_factor": 0.97,
+      "energy_kwh": 1200.0
+    },
+    "expected_result": "rejected by validation"
+  },
+  "invalid_string_voltage": {
+    "description": "This will be REJECTED - voltage is a non-numeric string instead of a number",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "2026-03-22T10:00:00+00:00",
+      "schema_version": "v1",
+      "voltage": "not-a-number",
+      "current": 12.5,
+      "power": 2875.0,
+      "power_factor": 0.97,
+      "energy_kwh": 1200.0
+    },
+    "expected_result": "rejected by validation"
+  },
+  "invalid_bad_timestamp": {
+    "description": "This will be REJECTED - timestamp not ISO 8601",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "03/22/2026 10:00:00",
+      "schema_version": "v1",
+      "voltage": 231.0,
+      "current": 12.5,
+      "power": 2875.0,
+      "power_factor": 0.97,
+      "energy_kwh": 1200.0
+    },
+    "expected_result": "rejected by validation"
+  },
+  "invalid_power_factor_too_high": {
+    "description": "This is OUTSIDE the recommended operating range, but current validation accepts numeric values greater than 1.0",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "2026-03-22T10:00:00+00:00",
+      "schema_version": "v1",
+      "voltage": 231.0,
+      "current": 12.5,
+      "power": 2875.0,
+      "power_factor": 1.2,
+      "energy_kwh": 1200.0
+    },
+    "expected_result": "accepted by validation but outside recommended operating range"
+  },
+  "warning_no_power_factor": {
+    "description": "Accepted by current validation; power factor is omitted",
+    "payload": {
+      "device_id": "COMPRESSOR-001",
+      "timestamp": "2026-03-22T10:00:00+00:00",
+      "schema_version": "v1",
+      "voltage": 231.0,
+      "current": 12.5,
+      "power": 2875.0,
+      "energy_kwh": 1200.0
+    },
+    "expected_result": "accepted by validation"
+  }
+}

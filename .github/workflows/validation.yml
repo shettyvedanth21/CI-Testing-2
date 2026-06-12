@@ -1,0 +1,275 @@
+name: Broad CI Validation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broad-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-suites:
+    name: Broad Suites / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      # Keep broad coverage, but avoid requiring one hosted runner per suite.
+      # Each shard still reports individual suite results through report.json.
+      max-parallel: 4
+      matrix:
+        include:
+          - name: Core Identity And Access
+            slug: broad-core-identity-access
+            suites: |
+              Auth And Identity
+              Org Plant And User Management
+              Org Suspension And Access Enforcement
+              Device Onboarding And Provisioning
+              MQTT Auth And Telemetry Ingestion
+          - name: Machine Operations
+            slug: broad-machine-operations
+            suites: |
+              Machine Runtime States
+              Machine Dashboard Calculations
+              Parameter Config And Health Score
+              Shift And Uptime
+              Maintenance Records
+          - name: Analytics Reports And Waste
+            slug: broad-analytics-reports-waste
+            suites: |
+              Calendar And Consumption Consistency
+              Analytics Job Flow
+              Reports And Scheduled Reports
+              Waste Analysis
+              Factory Copilot
+          - name: Rules Platform And Runtime
+            slug: broad-rules-platform-runtime
+            suites: |
+              Rules And Notifications
+              Notification Usage And Delivery Accounting
+              Tariff And Tenant Isolation
+              Platform Maintenance
+              Runtime Stability And Recovery
+              Premium Feature Gating
+              Database Integrity And Concurrency
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: ai_factoryops
+          MYSQL_USER: energy
+          MYSQL_PASSWORD: energy
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uenergy -penergy"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-validation.txt
+
+      - name: Set up Node.js
+        if: ${{ contains(matrix.suites, 'Premium Feature Gating') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui-web/package-lock.json
+
+      - name: Bootstrap validation runtime
+        run: ./scripts/bootstrap-validation-runtime.sh
+
+      - name: Install ui-web dependencies
+        if: ${{ contains(matrix.suites, 'Premium Feature Gating') }}
+        working-directory: ui-web
+        run: npm ci
+
+      - name: Install Playwright browser
+        if: ${{ contains(matrix.suites, 'Premium Feature Gating') }}
+        working-directory: ui-web
+        run: npx playwright install --with-deps chromium
+
+      - name: Wait for backing services
+        env:
+          WAIT_FOR_MYSQL: "1"
+          WAIT_FOR_REDIS: "1"
+        run: ./scripts/wait-for-broad-ci-services.sh
+
+      - name: Run suite
+        env:
+          BROAD_CI_SUITES: ${{ matrix.suites }}
+        run: |
+          suite_args=()
+          while IFS= read -r suite_name; do
+            if [[ -n "${suite_name}" ]]; then
+              suite_args+=(--suite "${suite_name}")
+            fi
+          done <<< "${BROAD_CI_SUITES}"
+          ./scripts/run-broad-ci-validation.sh "${suite_args[@]}" --artifacts-dir "artifacts/broad-ci-validation/${{ matrix.slug }}"
+
+      - name: Publish suite summary
+        if: always()
+        run: |
+          summary_path="artifacts/broad-ci-validation/${{ matrix.slug }}/summary.md"
+          if [[ -f "${summary_path}" ]]; then
+            cat "${summary_path}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No summary generated for ${{ matrix.name }}." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload suite artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: broad-ci-${{ matrix.slug }}
+          path: artifacts/broad-ci-validation/${{ matrix.slug }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  broad-ci:
+    name: Broad CI Validation
+    if: ${{ always() }}
+    needs:
+      - python-suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download suite artifacts
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: broad-ci-*
+          path: broad-ci-artifacts
+
+      - name: Publish aggregate summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          expected_output = subprocess.check_output(
+              [sys.executable, "scripts/ci_broad_validation.py", "--list-suites"],
+              text=True,
+          )
+          expected_suites = [
+              line.split("\t", 1)[1]
+              for line in expected_output.splitlines()
+              if "\t" in line
+          ]
+
+          reports = sorted(Path("broad-ci-artifacts").glob("**/report.json"))
+          lines = ["# Broad CI Validation", ""]
+          seen_results = {}
+          duplicate_suites = []
+          if not reports:
+              lines.append("- No suite artifacts were collected.")
+          else:
+              for report_path in reports:
+                  data = json.loads(report_path.read_text(encoding="utf-8"))
+                  for suite in data.get("suites", []):
+                      suite_name = suite["name"]
+                      if suite_name in seen_results:
+                          duplicate_suites.append(suite_name)
+                      seen_results[suite_name] = suite["status"]
+
+          missing_suites = [name for name in expected_suites if name not in seen_results]
+          unexpected_suites = [name for name in seen_results if name not in expected_suites]
+          aggregate_ok = (
+              bool(reports)
+              and not missing_suites
+              and not unexpected_suites
+              and not duplicate_suites
+              and all(status == "PASS" for status in seen_results.values())
+          )
+
+          lines.extend(
+              [
+                  f"- expected_suites: {len(expected_suites)}",
+                  f"- reported_suites: {len(seen_results)}",
+                  f"- result: {'PASS' if aggregate_ok else 'FAIL'}",
+                  "",
+                  "| Suite | Result |",
+                  "|---|---|",
+              ]
+          )
+          for suite_name in expected_suites:
+              lines.append(f"| {suite_name} | {seen_results.get(suite_name, 'MISSING')} |")
+          for suite_name in unexpected_suites:
+              lines.append(f"| {suite_name} | UNEXPECTED |")
+          for suite_name in duplicate_suites:
+              lines.append(f"| {suite_name} | DUPLICATE |")
+
+          Path("broad-ci-summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          Path("broad-ci-aggregate-result.json").write_text(
+              json.dumps(
+                  {
+                      "ok": aggregate_ok,
+                      "expected_suites": expected_suites,
+                      "reported_suites": sorted(seen_results),
+                      "missing_suites": missing_suites,
+                      "unexpected_suites": unexpected_suites,
+                      "duplicate_suites": duplicate_suites,
+                  },
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+          PY
+          cat broad-ci-summary.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Enforce overall broad CI result
+        run: |
+          aggregate_ok="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          result_path = Path("broad-ci-aggregate-result.json")
+          if not result_path.exists():
+              print("false")
+          else:
+              print("true" if json.loads(result_path.read_text(encoding="utf-8")).get("ok") else "false")
+          PY
+          )"
+          if [[ "${aggregate_ok}" != "true" ]]; then
+            echo "Broad CI suite artifact coverage failed."
+            cat broad-ci-aggregate-result.json || true
+            exit 1
+          fi
+          if [[ "${{ needs.python-suites.result }}" != "success" ]]; then
+            echo "Broad suite matrix failed."
+            exit 1
+          fi

@@ -1,0 +1,18 @@
+[ req ]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+req_extensions = req_ext
+
+[ dn ]
+CN = emqx
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = emqx
+DNS.2 = emqx.local
+DNS.3 = localhost
+DNS.4 = host.docker.internal
